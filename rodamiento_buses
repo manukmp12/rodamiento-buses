@@ -1,0 +1,329 @@
+import os
+import subprocess
+import platform
+import tkinter as tk
+from tkinter import messagebox
+import pandas as pd
+from datetime import datetime, time
+
+EXCEL_FILE = "rodamiento_buses.xlsx"
+TIEMPO_DEFAULT = 15 * 60  # Tiempo en segundos si no hay siguiente hora definida
+
+class RodamientoApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Control de Rodamiento - Despachos")
+        self.root.attributes("-topmost", True)
+        self.root.geometry("440x355")
+        self.root.minsize(380, 310)
+        self.root.config(bg="#121212")
+
+        self.df = pd.DataFrame()
+        self.indice_actual = 0
+        self.tiempo_restante = TIEMPO_DEFAULT
+        self.timer_id = None
+        self.en_pausa = True
+
+        # --- BARRA SUPERIOR ---
+        frame_top = tk.Frame(root, bg="#121212")
+        frame_top.pack(fill=tk.X, padx=8, pady=(4, 2))
+
+        tk.Label(
+            frame_top, text="🚍 CONTROL DE RODAMIENTO", 
+            font=("Arial", 10, "bold"), bg="#121212", fg="#00ffcc"
+        ).pack(side=tk.LEFT)
+
+        tk.Button(
+            frame_top, text="✏️ Modificar Excel", command=self.abrir_excel,
+            bg="#e67e22", fg="white", font=("Arial", 8, "bold"), relief="flat", padx=6, pady=1
+        ).pack(side=tk.RIGHT)
+
+        # --- TARJETA PRINCIPAL ---
+        card = tk.Frame(root, bg="#202020", bd=1, relief="solid")
+        card.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
+
+        # 1. Turno despachado previo
+        self.lbl_prev = tk.Label(
+            card, text="▲ DESPACHADO: ---", 
+            font=("Arial", 8), bg="#202020", fg="#777777"
+        )
+        self.lbl_prev.pack(fill=tk.X, padx=4, pady=(4, 1))
+
+        tk.Frame(card, bg="#2e2e2e", height=1).pack(fill=tk.X, padx=8, pady=1)
+
+        # 2. Vehículo actual
+        self.lbl_trayecto = tk.Label(
+            card, text="---", 
+            font=("Arial", 12, "bold"), bg="#202020", fg="#ffcc00"
+        )
+        self.lbl_trayecto.pack(pady=(2, 0))
+
+        self.lbl_hora_actual = tk.Label(
+            card, text="⏰ Salida: ---", 
+            font=("Arial", 10, "bold"), bg="#202020", fg="#e0e0e0"
+        )
+        self.lbl_hora_actual.pack(pady=0)
+
+        self.lbl_vehiculo = tk.Label(
+            card, text="---", 
+            font=("Arial", 32, "bold"), bg="#202020", fg="#00ffcc"
+        )
+        self.lbl_vehiculo.pack(pady=0)
+
+        self.lbl_conductor = tk.Label(
+            card, text="---", 
+            font=("Arial", 11, "bold"), bg="#202020", fg="#ffffff"
+        )
+        self.lbl_conductor.pack(pady=(0, 2))
+
+        tk.Frame(card, bg="#2e2e2e", height=1).pack(fill=tk.X, padx=8, pady=1)
+
+        # 3. Siguiente vehículo
+        self.lbl_next = tk.Label(
+            card, text="▼ SIGUIENTE: ---", 
+            font=("Arial", 8), bg="#202020", fg="#777777"
+        )
+        self.lbl_next.pack(fill=tk.X, padx=4, pady=(1, 4))
+
+        # --- BARRA INFERIOR (Controles y cronómetro) ---
+        bar_controls = tk.Frame(root, bg="#121212")
+        bar_controls.pack(fill=tk.X, padx=8, pady=(4, 6))
+
+        frame_timer = tk.Frame(bar_controls, bg="#121212")
+        frame_timer.pack(side=tk.LEFT)
+
+        self.lbl_timer = tk.Label(
+            frame_timer, text="--:--", 
+            font=("Arial", 14, "bold"), bg="#121212", fg="#00ff00", width=6
+        )
+        self.lbl_timer.pack(side=tk.LEFT)
+
+        self.lbl_intervalo_info = tk.Label(
+            frame_timer, text="", font=("Arial", 8), bg="#121212", fg="#888888"
+        )
+        self.lbl_intervalo_info.pack(side=tk.LEFT, padx=(2, 0))
+
+        self.btn_siguiente = tk.Button(
+            bar_controls, text="⏭ Siguiente", command=self.siguiente_vehiculo, 
+            bg="#17a2b8", fg="white", font=("Arial", 8, "bold"), relief="flat", padx=6, pady=2
+        )
+        self.btn_siguiente.pack(side=tk.RIGHT, padx=2)
+
+        self.btn_pausa = tk.Button(
+            bar_controls, text="⏸ Pausa", command=self.pausar_cronometro, 
+            bg="#ffc107", fg="black", font=("Arial", 8, "bold"), relief="flat", padx=6, pady=2
+        )
+        self.btn_pausa.pack(side=tk.RIGHT, padx=2)
+
+        self.btn_iniciar = tk.Button(
+            bar_controls, text="▶ Iniciar", command=self.iniciar_cronometro, 
+            bg="#28a745", fg="white", font=("Arial", 8, "bold"), relief="flat", padx=6, pady=2
+        )
+        self.btn_iniciar.pack(side=tk.RIGHT, padx=2)
+
+        self.cargar_datos()
+
+    def abrir_excel(self):
+        if not os.path.exists(EXCEL_FILE):
+            messagebox.showerror("Error", f"No se encontró el archivo:\n{EXCEL_FILE}")
+            return
+
+        try:
+            sistema = platform.system()
+            if sistema == "Windows":
+                os.startfile(EXCEL_FILE)
+            elif sistema == "Darwin":
+                subprocess.call(["open", EXCEL_FILE])
+            else:
+                subprocess.call(["xdg-open", EXCEL_FILE])
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo abrir el archivo:\n{e}")
+            return
+
+        recargar = messagebox.askyesno(
+            "Excel abierto",
+            "Modifica los datos en Excel, guarda (Ctrl + G) y ciérralo.\n\n"
+            "¿Deseas recargar la aplicación ahora?"
+        )
+        if recargar:
+            self.cargar_datos()
+
+    def obtener_valor_campo(self, fila, cols_prioritarias):
+        """Busca el primer valor no nulo entre las columnas candidatas."""
+        for c in cols_prioritarias:
+            if c in fila and pd.notna(fila[c]):
+                val = fila[c]
+                if isinstance(val, str) and not val.strip():
+                    continue
+                try:
+                    num = float(val)
+                    return int(num) if num.is_integer() else val
+                except (ValueError, TypeError):
+                    return val
+        return "N/D"
+
+    def cargar_datos(self):
+        if not os.path.exists(EXCEL_FILE):
+            messagebox.showwarning("Atención", f"No se encontró {EXCEL_FILE}")
+            return
+        try:
+            df_raw = pd.read_excel(EXCEL_FILE)
+            
+            # Filtrar filas vacías de trayecto u hora
+            self.df = df_raw.dropna(subset=["HORA", "TRAYECTO"]).reset_index(drop=True)
+            
+            if self.df.empty:
+                messagebox.showwarning("Vacío", "El archivo no contiene turnos válidos con HORA y TRAYECTO.")
+                return
+
+            if self.indice_actual >= len(self.df):
+                self.indice_actual = 0
+
+            self.actualizar_turno_y_cronometro(reiniciar_conteo=True)
+        except PermissionError:
+            messagebox.showerror("Error", "Cierra el archivo en Excel antes de recargar para evitar bloqueos.")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo leer el archivo:\n{e}")
+
+    def parsear_hora(self, valor_hora):
+        if pd.isna(valor_hora):
+            return None
+        if isinstance(valor_hora, datetime):
+            return valor_hora
+        if isinstance(valor_hora, time):
+            hoy = datetime.today()
+            return datetime.combine(hoy, valor_hora)
+
+        str_h = str(valor_hora).strip()
+        formatos = [
+            "%H:%M:%S", "%H:%M",
+            "%I:%M:%S %p", "%I:%M %p",
+            "%I:%M%p", "%I:%M:%S%p"
+        ]
+        for fmt in formatos:
+            try:
+                t = datetime.strptime(str_h, fmt)
+                hoy = datetime.today()
+                return datetime.combine(hoy, t.time())
+            except ValueError:
+                continue
+        return None
+
+    def formatear_hora(self, valor_hora):
+        t = self.parsear_hora(valor_hora)
+        return t.strftime("%I:%M %p") if t else ("---" if pd.isna(valor_hora) else str(valor_hora))
+
+    def calcular_segundos_entre_turnos(self, hora_actual_raw, hora_siguiente_raw):
+        """Calcula los segundos exactos entre un turno y el siguiente según la planilla."""
+        t1 = self.parsear_hora(hora_actual_raw)
+        t2 = self.parsear_hora(hora_siguiente_raw)
+        if t1 and t2:
+            diferencia = (t2 - t1).total_seconds()
+            if diferencia < 0:
+                diferencia += 24 * 3600  # Cambio de jornada / medianoche
+            if diferencia > 0:
+                return int(diferencia)
+        return TIEMPO_DEFAULT
+
+    def actualizar_turno_y_cronometro(self, reiniciar_conteo=True):
+        total = len(self.df)
+        if self.df.empty or self.indice_actual >= total:
+            self.lbl_trayecto.config(text="---")
+            self.lbl_hora_actual.config(text="⏰ Salida: ---")
+            self.lbl_vehiculo.config(text="---")
+            self.lbl_conductor.config(text="---")
+            self.lbl_prev.config(text="▲ DESPACHADO: Sin registros")
+            self.lbl_next.config(text="▼ SIGUIENTE: Fin de despachos")
+            self.lbl_timer.config(text="00:00", fg="yellow")
+            self.lbl_intervalo_info.config(text="")
+            return
+
+        # Fila en turno
+        fila = self.df.iloc[self.indice_actual]
+        hora_raw = fila.get("HORA", "N/D")
+        interno = self.obtener_valor_campo(fila, ["N° INTERNO", "N° INTERNO (BASE)", "INTERNO"])
+        conductor = self.obtener_valor_campo(fila, ["NOMBRE DEL CONDUCTOR", "CONDUCTOR (BASE)", "CONDUCTOR"])
+
+        self.lbl_trayecto.config(text=str(fila.get("TRAYECTO", "N/D")))
+        self.lbl_hora_actual.config(text=f"⏰ Salida: {self.formatear_hora(hora_raw)}")
+        self.lbl_vehiculo.config(text=str(interno))
+        self.lbl_conductor.config(text=str(conductor))
+
+        # Turno anterior
+        if self.indice_actual > 0:
+            f_prev = self.df.iloc[self.indice_actual - 1]
+            h_prev = self.formatear_hora(f_prev.get("HORA", ""))
+            int_prev = self.obtener_valor_campo(f_prev, ["N° INTERNO", "N° INTERNO (BASE)", "INTERNO"])
+            self.lbl_prev.config(
+                text=f"▲ DESPACHADO ({h_prev}): #{int_prev} | {f_prev.get('TRAYECTO', '')}"
+            )
+        else:
+            self.lbl_prev.config(text="▲ DESPACHADO: (Inicio de jornada)")
+
+        # Turno siguiente y lapso dinámico
+        if self.indice_actual + 1 < total:
+            f_next = self.df.iloc[self.indice_actual + 1]
+            hora_next_raw = f_next.get("HORA", "")
+            h_next = self.formatear_hora(hora_next_raw)
+            int_next = self.obtener_valor_campo(f_next, ["N° INTERNO", "N° INTERNO (BASE)", "INTERNO"])
+            self.lbl_next.config(
+                text=f"▼ SIGUIENTE ({h_next}): #{int_next} | {f_next.get('TRAYECTO', '')}"
+            )
+            segundos_lapso = self.calcular_segundos_entre_turnos(hora_raw, hora_next_raw)
+        else:
+            self.lbl_next.config(text="▼ SIGUIENTE: (Último despacho)")
+            segundos_lapso = TIEMPO_DEFAULT
+
+        if reiniciar_conteo:
+            self.tiempo_restante = segundos_lapso
+            minutos = segundos_lapso // 60
+            self.lbl_intervalo_info.config(text=f"(Lapso: {minutos}m)")
+            m = self.tiempo_restante // 60
+            s = self.tiempo_restante % 60
+            self.lbl_timer.config(text=f"{m:02d}:{s:02d}", fg="#00ff00")
+
+    def iniciar_cronometro(self):
+        if self.df.empty:
+            messagebox.showwarning("Advertencia", "No hay datos cargados.")
+            return
+        if self.en_pausa:
+            self.en_pausa = False
+            if self.timer_id:
+                self.root.after_cancel(self.timer_id)
+            self.actualizar_cronometro()
+
+    def pausar_cronometro(self):
+        self.en_pausa = True
+        if self.timer_id:
+            self.root.after_cancel(self.timer_id)
+            self.timer_id = None
+
+    def siguiente_vehiculo(self):
+        if self.df.empty:
+            return
+        self.pausar_cronometro()
+        self.indice_actual += 1
+        if self.indice_actual < len(self.df):
+            self.actualizar_turno_y_cronometro(reiniciar_conteo=True)
+            self.iniciar_cronometro()
+        else:
+            self.actualizar_turno_y_cronometro(reiniciar_conteo=False)
+            messagebox.showinfo("Aviso", "Se han completado todos los despachos programados.")
+
+    def actualizar_cronometro(self):
+        if self.en_pausa:
+            return
+        if self.tiempo_restante > 0:
+            m = self.tiempo_restante // 60
+            s = self.tiempo_restante % 60
+            self.lbl_timer.config(text=f"{m:02d}:{s:02d}")
+            self.lbl_timer.config(fg="#ff4444" if self.tiempo_restante <= 120 else "#00ff00")
+            self.tiempo_restante -= 1
+            self.timer_id = self.root.after(1000, self.actualizar_cronometro)
+        else:
+            self.siguiente_vehiculo()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = RodamientoApp(root)
+    root.mainloop()
